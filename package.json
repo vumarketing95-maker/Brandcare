@@ -1,0 +1,19 @@
+{
+  "name": "content-scoring-backend",
+  "version": "1.0.0",
+  "description": "Backend nhỏ cho tính năng Chấm điểm nội dung — tải link (ảnh/video), cắt frame, gửi Claude API chấm theo bộ tiêu chí thuật toán từng nền tảng, trả điểm về cho tool.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "fluent-ffmpeg": "^2.1.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
