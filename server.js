@@ -156,6 +156,9 @@ function buildPrompt(item) {
 
 Mục tiêu quảng cáo: ${item.objective || 'Tin nhắn/Nhắn tin'}
 Nội dung mới hay biến thể: ${item.variant || 'Mới hoàn toàn'}
+Chủ đề / Ngành hàng: ${item.topic || '(không rõ — tự nhận diện qua nội dung nhìn thấy, KHÔNG suy đoán bừa nếu không chắc, chỉ mô tả chung "sản phẩm/dịch vụ" nếu chưa rõ đúng ngành gì)'}
+
+QUAN TRỌNG: khi viết "note" và "suggestion" cho từng tiêu chí, PHẢI đối chiếu đúng "Chủ đề/Ngành hàng" ở trên — nếu đã biết rõ chủ đề, TUYỆT ĐỐI không nhắc tới sản phẩm/dịch vụ hay hình ảnh của ngành khác (VD: không nói về da liễu/thẩm mỹ da nếu chủ đề đã ghi rõ là cơ xương khớp). Nếu chủ đề chưa rõ, chỉ mô tả chung "sản phẩm/dịch vụ", không suy đoán bừa ngành hàng.
 
 Chấm theo từng tiêu chí sau (mỗi tiêu chí 0–10 điểm, dựa trên các khung hình đang thấy — nếu tiêu chí liên quan tới chuyển động/âm thanh mà không đánh giá chắc chắn được từ ảnh tĩnh, hãy chấm điểm trung bình 5-6 và ghi rõ trong "note" là "không đánh giá được đầy đủ từ khung hình tĩnh"):
 ${rubric.criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
@@ -170,7 +173,7 @@ app.post('/analyze', async (req, res) => {
   if (!checkSecret(req, res)) return;
   if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, error: 'Server chưa cấu hình ANTHROPIC_API_KEY.' });
 
-  const { link, platform, objective, variant } = req.body || {};
+  const { link, platform, objective, variant, topic } = req.body || {};
   if (!link || !platform || !CONTENT_SCORING_RUBRIC[platform]) {
     return res.status(400).json({ ok: false, error: 'Thiếu link hoặc nền tảng không hợp lệ.' });
   }
@@ -197,7 +200,7 @@ app.post('/analyze', async (req, res) => {
       frameMeta = labelFramesForVideo(frameList, duration);
     }
 
-    const prompt = buildPrompt({ platform, objective, variant, frameCount: imageBuffers.length });
+    const prompt = buildPrompt({ platform, objective, variant, topic, frameCount: imageBuffers.length });
     const content = [
       { type: 'text', text: prompt },
       ...imageBuffers.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.buf.toString('base64') } })),
