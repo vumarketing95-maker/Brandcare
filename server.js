@@ -346,7 +346,9 @@ async function rescoreAutoEditedVideo({ outPath, rubric, platform, objective, va
     { type: 'text', text: prompt },
     ...imageBuffers.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.buf.toString('base64') } })),
   ];
-  const message = await anthropic.messages.create({ model: CLAUDE_MODEL, max_tokens: 2048, messages: [{ role: 'user', content }] });
+  // max_tokens: 3072 — xem ghi chú ở lần gọi Claude chấm chính bên dưới (buildPrompt giờ đòi hỏi "note"/"suggestion"
+  // chi tiết + cụ thể hơn, dài hơn hẳn bản trước, 2048 hay bị cắt cụt giữa chừng).
+  const message = await anthropic.messages.create({ model: CLAUDE_MODEL, max_tokens: 3072, messages: [{ role: 'user', content }] });
   const textOut = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
   const jsonMatch = textOut.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return null;
@@ -435,12 +437,14 @@ app.post('/analyze', async (req, res) => {
       ...imageBuffers.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.buf.toString('base64') } })),
     ];
 
-    // max_tokens: 2048 — TĂNG từ 1024 vì mỗi tiêu chí giờ có thêm "suggestion" (gợi ý sửa cụ thể) bên cạnh
-    // "note", gần như gấp đôi lượng chữ Claude cần trả về cho 6 tiêu chí; 1024 hay bị cắt giữa chừng làm JSON
-    // trả về không đủ dấu đóng ngoặc → lỗi "không đúng định dạng JSON mong đợi" dù Claude chấm đúng, chỉ là bị cụt.
+    // max_tokens: 3072 — TĂNG tiếp từ 2048 vì buildPrompt giờ đòi hỏi "note"/"suggestion" chi tiết, cụ thể, neo
+    // vào chi tiết thật + ghi rõ hậu kỳ hay cần quay lại (yêu cầu chất lượng mới) — dài hơn hẳn bản trước, 2048
+    // vẫn còn bị cắt cụt giữa chừng làm JSON không đủ dấu đóng ngoặc → lỗi "không đúng định dạng JSON mong đợi"
+    // dù Claude chấm đúng, chỉ là bị cụt. (Lịch sử: 1024 → 2048 → 3072, mỗi lần tăng do prompt đòi hỏi output
+    // chi tiết hơn ở lần đó.)
     const message = await anthropic.messages.create({
       model: CLAUDE_MODEL,
-      max_tokens: 2048,
+      max_tokens: 3072,
       messages: [{ role: 'user', content }],
     });
 
