@@ -152,8 +152,15 @@ function labelFramesForVideo(frameList, duration) {
 
 function buildPrompt(item) {
   const rubric = CONTENT_SCORING_RUBRIC[item.platform];
-  return `Bạn đang xem ${item.frameCount > 1 ? `${item.frameCount} khung hình tĩnh cắt ra từ 1 video quảng cáo NHÁP (đầu/giữa/cuối video, KHÔNG phải toàn bộ chuyển động/âm thanh thật)` : '1 hình ảnh nội dung quảng cáo NHÁP'}. Chấm điểm nội dung này theo đúng tiêu chí thuật toán ${rubric.label}.
+  const hookIdx = rubric.hookCriterionIndex || 1;
+  // Liệt kê thời điểm (giây) của từng khung hình trong video gốc — để Claude có thể chỉ đích danh 1 khung hình
+  // khác (thời điểm khác) làm điểm mở đầu mạnh hơn, thay vì chỉ nói chung chung "cắt bớt đoạn đầu".
+  const frameTimeLines = (item.frameMeta && item.frameMeta.length > 1)
+    ? item.frameMeta.map((f, i) => `- Khung hình ${i + 1} (${f.label}): giây ${Math.round(f.timestampSec)}${item.duration ? `/${Math.round(item.duration)}` : ''}`).join('\n')
+    : '';
 
+  return `Bạn đang xem ${item.frameCount > 1 ? `${item.frameCount} khung hình tĩnh cắt ra từ 1 video quảng cáo NHÁP (đầu/giữa/cuối video, KHÔNG phải toàn bộ chuyển động/âm thanh thật)` : '1 hình ảnh nội dung quảng cáo NHÁP'}. Chấm điểm nội dung này theo đúng tiêu chí thuật toán ${rubric.label}.
+${frameTimeLines ? `\nThời điểm (giây) của từng khung hình trong video gốc:\n${frameTimeLines}\n` : ''}
 Mục tiêu quảng cáo: ${item.objective || 'Tin nhắn/Nhắn tin'}
 Nội dung mới hay biến thể: ${item.variant || 'Mới hoàn toàn'}
 Chủ đề / Ngành hàng: ${item.topic || '(không rõ — tự nhận diện qua nội dung nhìn thấy, KHÔNG suy đoán bừa nếu không chắc, chỉ mô tả chung "sản phẩm/dịch vụ" nếu chưa rõ đúng ngành gì)'}
@@ -165,8 +172,80 @@ ${rubric.criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 
 Với MỖI tiêu chí, ngoài "note" (giải thích NGẮN vì sao được điểm đó, dựa trên những gì thấy trong khung hình), bắt buộc có thêm "suggestion" — một gợi ý sửa CỤ THỂ, hành động được ngay (VD: "Thêm phụ đề tiếng Việt cỡ chữ lớn ở nửa dưới khung hình", "Cắt bỏ 2 giây đầu đang đứng yên, mở đầu ngay bằng cảnh cận sản phẩm"), không chấm chung chung "làm tốt hơn". Nếu tiêu chí đã đạt điểm cao (≥8/10), "suggestion" có thể ghi ngắn gọn "Đã tốt, giữ nguyên".
 
+RIÊNG tiêu chí số ${hookIdx} (tiêu chí hook/mở đầu) — nếu điểm dưới 8/10 VÀ đang xem VIDEO (nhiều khung hình, có liệt kê "Thời điểm khung hình" ở trên) VÀ trong các khung hình đó có 1 khung hình cho thấy khoảnh khắc mở đầu mạnh/thu hút hơn khung hình đầu hiện tại (chuyển động, cận cảnh sản phẩm, cảm xúc rõ...), hãy thêm field "hookRecutSec" = ĐÚNG 1 trong các số giây đã liệt kê ở trên (KHÔNG bịa số ngoài danh sách, KHÔNG suy diễn số giây không có trong danh sách). Nếu không có khung hình nào tốt hơn, hoặc đây là ảnh tĩnh (không phải video), hoặc điểm đã ≥8/10, để "hookRecutSec": null.
+
 Trả lời DUY NHẤT bằng JSON hợp lệ theo đúng cấu trúc sau, không thêm chữ nào khác ngoài JSON:
-{"totalScore100": <số nguyên 0-100, = trung bình cộng 6 điểm tiêu chí x10>, "criteria": [{"index":1,"score10":<0-10>,"note":"<nhận xét ngắn>","suggestion":"<gợi ý sửa cụ thể, hành động được ngay>"}, ... đủ 6 mục], "recommendation": "<1-2 câu nên sửa gì trước khi chạy quảng cáo, hoặc \\"Đủ điều kiện chạy\\" nếu tốt>"}`;
+{"totalScore100": <số nguyên 0-100, = trung bình cộng ${rubric.criteria.length} điểm tiêu chí x10>, "criteria": [{"index":1,"score10":<0-10>,"note":"<nhận xét ngắn>","suggestion":"<gợi ý sửa cụ thể, hành động được ngay>","hookRecutSec":<chỉ điền ở ĐÚNG tiêu chí số ${hookIdx} — số giây hoặc null; các tiêu chí khác BỎ QUA field này>"}, ... đủ ${rubric.criteria.length} mục], "recommendation": "<1-2 câu nên sửa gì trước khi chạy quảng cáo, hoặc \\"Đủ điều kiện chạy\\" nếu tốt>"}`;
+}
+
+// Cắt 1 đoạn demo NGẮN (3-6 giây) từ CHÍNH video gốc, bắt đầu ở thời điểm Claude đề xuất — để xem thử "nếu mở
+// đầu từ đây thì sao" mà không cần dựng lại thủ công. Đây là bản xem nhanh (không dựng chuyên nghiệp: không cắt
+// cảnh, không thêm chữ/nhạc), chỉ giúp hình dung hướng sửa trước khi quyết định dựng lại chính thức.
+function cutHookDemoClip(videoPath, workDir, startSec, duration) {
+  return new Promise((resolve, reject) => {
+    const outPath = path.join(workDir, 'hook-demo.mp4');
+    const clipLen = Math.max(3, Math.min(6, duration - startSec));
+    if (clipLen < 1) { resolve(null); return; }
+    ffmpeg(videoPath)
+      .setStartTime(startSec)
+      .duration(clipLen)
+      .outputOptions([
+        '-vf', 'scale=480:-2',
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '28',
+        '-c:a', 'aac',
+        '-b:a', '96k',
+        '-movflags', '+faststart',
+      ])
+      .on('end', async () => {
+        try {
+          const stat = await fsp.stat(outPath);
+          if (stat.size > 8 * 1024 * 1024) { resolve(null); return; } // quá nặng — bỏ qua thay vì trả response nặng nề
+          const buf = await fsp.readFile(outPath);
+          resolve({
+            dataUrl: `data:video/mp4;base64,${buf.toString('base64')}`,
+            startSec: Math.round(startSec),
+            durationSec: Math.round(clipLen),
+          });
+        } catch (e) { reject(e); }
+      })
+      .on('error', (err) => reject(err))
+      .save(outPath);
+  });
+}
+
+// Gọi Claude kèm công cụ tìm kiếm web (best-effort) để tìm 1-2 quảng cáo THẬT cùng ngành có hook tốt, tham khảo
+// cách làm. KHÔNG được để lỗi ở đây làm hỏng cả kết quả chấm điểm chính — mọi lỗi đều bị bắt và trả về mảng rỗng.
+async function findHookReferenceExamples({ platform, topic }) {
+  try {
+    const rubric = CONTENT_SCORING_RUBRIC[platform];
+    const searchPrompt = `Tìm 1-2 quảng cáo THẬT đang chạy hoặc từng chạy trên nền tảng tương tự ${rubric.label}, cùng ngành/chủ đề "${topic || '(chưa rõ ngành cụ thể — tìm ví dụ hook quảng cáo hiệu quả nói chung, không giới hạn ngành)'}", có đoạn mở đầu (hook) ấn tượng, thu hút ngay trong vài giây đầu.
+
+Với MỖI ví dụ tìm được, trả về NGẮN GỌN: tên nhãn hàng/nguồn, link (nếu tìm được link thật), và 1 câu giải thích NGẮN vì sao hook của họ hiệu quả — dùng để THAM KHẢO cách làm, không phải để copy nguyên văn. TUYỆT ĐỐI không bịa link hay tên nhãn hàng không có thật — nếu không tìm được ví dụ đáng tin cậy, trả về mảng rỗng.
+
+Trả lời DUY NHẤT bằng JSON hợp lệ, không thêm chữ nào khác:
+{"examples": [{"source":"<tên nhãn hàng/nguồn>","url":"<link thật hoặc chuỗi rỗng nếu không có>","note":"<vì sao hook hiệu quả, 1 câu>"}]}`;
+
+    const payload = {
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+      messages: [{ role: 'user', content: searchPrompt }],
+    };
+    const client = (anthropic.beta && anthropic.beta.messages && typeof anthropic.beta.messages.create === 'function')
+      ? anthropic.beta.messages
+      : anthropic.messages;
+    const msg = await client.create(payload);
+    const textOut = (msg.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    const jsonMatch = textOut.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return [];
+    const parsed = JSON.parse(jsonMatch[0]);
+    return Array.isArray(parsed.examples) ? parsed.examples.filter((e) => e && (e.source || e.url)).slice(0, 2) : [];
+  } catch (e) {
+    console.error('Lỗi tìm ví dụ hook tham khảo (bỏ qua, không chặn kết quả chấm điểm chính):', e.message);
+    return [];
+  }
 }
 
 app.post('/analyze', async (req, res) => {
@@ -186,21 +265,27 @@ app.post('/analyze', async (req, res) => {
     const { contentType } = await downloadToTemp(directUrl, rawPath);
 
     let imageBuffers = [];
-    let frameMeta = []; // [{label}] — cùng thứ tự với imageBuffers, dùng để hiện lại khung hình cho người xem
+    let frameMeta = []; // [{label, timestampSec?}] — cùng thứ tự với imageBuffers, dùng để hiện lại khung hình cho người xem
+    let videoPath = null; // chỉ khác null khi nội dung là VIDEO — cần giữ lại để cắt demo hook bên dưới (Bước sau khi Claude chấm xong)
+    let duration = null;
     if (contentType.startsWith('image/')) {
       imageBuffers = [{ buf: await fsp.readFile(rawPath), mediaType: contentType.includes('png') ? 'image/png' : 'image/jpeg' }];
       frameMeta = [{ label: 'Ảnh nội dung nháp' }];
     } else {
       // Coi như video — đổi tên có phần mở rộng để ffmpeg nhận diện đúng, rồi cắt frame.
-      const videoPath = rawPath + '.mp4';
+      videoPath = rawPath + '.mp4';
       await fsp.rename(rawPath, videoPath);
-      const { frames: frameList, duration } = await extractFramesForVideo(videoPath, workDir);
+      const extracted = await extractFramesForVideo(videoPath, workDir);
+      const frameList = extracted.frames;
+      duration = extracted.duration;
       if (!frameList.length) throw new Error('Không cắt được khung hình nào từ video — file có thể bị hỏng hoặc không đúng định dạng video.');
       imageBuffers = await Promise.all(frameList.map(async (f) => ({ buf: await fsp.readFile(f.path), mediaType: 'image/jpeg' })));
-      frameMeta = labelFramesForVideo(frameList, duration);
+      const labeled = labelFramesForVideo(frameList, duration);
+      // Gộp timestampSec (từ frameList) vào frameMeta (label) — buildPrompt cần cả hai để chỉ đích danh thời điểm cho Claude.
+      frameMeta = frameList.map((f, i) => ({ label: (labeled[i] && labeled[i].label) || `Khung hình ${i + 1}`, timestampSec: f.timestampSec }));
     }
 
-    const prompt = buildPrompt({ platform, objective, variant, topic, frameCount: imageBuffers.length });
+    const prompt = buildPrompt({ platform, objective, variant, topic, frameCount: imageBuffers.length, frameMeta, duration });
     const content = [
       { type: 'text', text: prompt },
       ...imageBuffers.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.buf.toString('base64') } })),
@@ -247,7 +332,31 @@ app.post('/analyze', async (req, res) => {
       dataUrl: `data:${im.mediaType};base64,${im.buf.toString('base64')}`,
     }));
 
-    return res.json({ ok: true, result: parsed, framesAnalyzed: imageBuffers.length, frames });
+    // Nếu tiêu chí Hook bị điểm thấp (<8/10) VÀ đây là video: (A) tự cắt 1 đoạn demo NGẮN từ chính video gốc,
+    // bắt đầu ở thời điểm Claude đề xuất, để xem thử hướng mở đầu mới; (B) tìm 1-2 ví dụ quảng cáo THẬT cùng
+    // ngành có hook tốt để tham khảo cách làm. Cả 2 đều best-effort — lỗi ở đây KHÔNG được làm hỏng kết quả
+    // chấm điểm chính đã có ở trên.
+    let hookDemo = null;
+    let hookReferenceExamples = [];
+    const hookIdx = rubric.hookCriterionIndex || 1;
+    const hookCriterion = parsed && Array.isArray(parsed.criteria) ? parsed.criteria.find((c) => Number(c.index) === hookIdx) : null;
+    if (videoPath && duration && hookCriterion) {
+      const hookScore = Number(hookCriterion.score10);
+      const recutSec = Number(hookCriterion.hookRecutSec);
+      const needsFix = !isNaN(hookScore) && hookScore < 8;
+      if (needsFix) {
+        if (!isNaN(recutSec) && recutSec > 1 && recutSec < duration - 1) {
+          try {
+            hookDemo = await cutHookDemoClip(videoPath, workDir, recutSec, duration);
+          } catch (e) {
+            console.error('Lỗi cắt demo hook (bỏ qua, không chặn kết quả chấm điểm chính):', e.message);
+          }
+        }
+        hookReferenceExamples = await findHookReferenceExamples({ platform, topic });
+      }
+    }
+
+    return res.json({ ok: true, result: parsed, framesAnalyzed: imageBuffers.length, frames, hookDemo, hookReferenceExamples });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: err.message || 'Lỗi không xác định.' });
