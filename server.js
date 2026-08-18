@@ -103,6 +103,19 @@ function ffprobeDuration(filePath) {
   });
 }
 
+// Đọc chiều rộng/cao thật của video gốc — dùng để biết có cần tự crop lại đúng tỷ lệ khung hình hay không
+// (VD video quay ngang 16:9 nhưng nền tảng yêu cầu dọc 9:16).
+function ffprobeDimensions(filePath) {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, data) => {
+      if (err || !data) return resolve(null);
+      const videoStream = (data.streams || []).find((s) => s.codec_type === 'video');
+      if (!videoStream || !videoStream.width || !videoStream.height) return resolve(null);
+      resolve({ width: videoStream.width, height: videoStream.height });
+    });
+  });
+}
+
 function extractFrame(filePath, timestampSec, outPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(filePath)
@@ -158,9 +171,12 @@ function buildPrompt(item) {
   const frameTimeLines = (item.frameMeta && item.frameMeta.length > 1)
     ? item.frameMeta.map((f, i) => `- Khung hình ${i + 1} (${f.label}): giây ${Math.round(f.timestampSec)}${item.duration ? `/${Math.round(item.duration)}` : ''}`).join('\n')
     : '';
+  const durationLine = (item.duration && rubric.targetDurationRange)
+    ? `Thời lượng video gốc: ${Math.round(item.duration)} giây (khuyến nghị của nền tảng: ${rubric.targetDurationRange[0]}–${rubric.targetDurationRange[1]} giây).`
+    : (item.duration ? `Thời lượng video gốc: ${Math.round(item.duration)} giây.` : '');
 
   return `Bạn đang xem ${item.frameCount > 1 ? `${item.frameCount} khung hình tĩnh cắt ra từ 1 video quảng cáo NHÁP (đầu/giữa/cuối video, KHÔNG phải toàn bộ chuyển động/âm thanh thật)` : '1 hình ảnh nội dung quảng cáo NHÁP'}. Chấm điểm nội dung này theo đúng tiêu chí thuật toán ${rubric.label}.
-${frameTimeLines ? `\nThời điểm (giây) của từng khung hình trong video gốc:\n${frameTimeLines}\n` : ''}
+${frameTimeLines ? `\nThời điểm (giây) của từng khung hình trong video gốc:\n${frameTimeLines}\n` : ''}${durationLine ? `\n${durationLine}\n` : ''}
 Mục tiêu quảng cáo: ${item.objective || 'Tin nhắn/Nhắn tin'}
 Nội dung mới hay biến thể: ${item.variant || 'Mới hoàn toàn'}
 Chủ đề / Ngành hàng: ${item.topic || '(không rõ — tự nhận diện qua nội dung nhìn thấy, KHÔNG suy đoán bừa nếu không chắc, chỉ mô tả chung "sản phẩm/dịch vụ" nếu chưa rõ đúng ngành gì)'}
@@ -170,12 +186,14 @@ QUAN TRỌNG: khi viết "note" và "suggestion" cho từng tiêu chí, PHẢI �
 Chấm theo từng tiêu chí sau (mỗi tiêu chí 0–10 điểm, dựa trên các khung hình đang thấy — nếu tiêu chí liên quan tới chuyển động/âm thanh mà không đánh giá chắc chắn được từ ảnh tĩnh, hãy chấm điểm trung bình 5-6 và ghi rõ trong "note" là "không đánh giá được đầy đủ từ khung hình tĩnh"):
 ${rubric.criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 
-Với MỖI tiêu chí, ngoài "note" (giải thích NGẮN vì sao được điểm đó, dựa trên những gì thấy trong khung hình), bắt buộc có thêm "suggestion" — một gợi ý sửa CỤ THỂ, hành động được ngay (VD: "Thêm phụ đề tiếng Việt cỡ chữ lớn ở nửa dưới khung hình", "Cắt bỏ 2 giây đầu đang đứng yên, mở đầu ngay bằng cảnh cận sản phẩm"), không chấm chung chung "làm tốt hơn". Nếu tiêu chí đã đạt điểm cao (≥8/10), "suggestion" có thể ghi ngắn gọn "Đã tốt, giữ nguyên".
+YÊU CẦU CHẤT LƯỢNG cho "note" và "suggestion" — đây là phần nhân sự content/ads sẽ đọc trực tiếp để sửa, PHẢI thực tế và làm được ngay, không được chung chung:
+- "note": chỉ ra CHÍNH XÁC điều gì nhìn thấy (hoặc không thấy) trong khung hình dẫn tới điểm đó — neo vào chi tiết cụ thể (VD "khung hình đầu vẫn là cảnh tĩnh, chưa có sản phẩm hay người xuất hiện" thay vì "mở đầu chưa hấp dẫn").
+- "suggestion": PHẢI là 1 hành động cụ thể, có thể làm ngay trong buổi dựng tiếp theo — nêu RÕ vị trí (giây nào/khung hình nào nếu liên quan), và RÕ đây là việc sửa được bằng hậu kỳ (cắt/dựng lại/thêm chữ/đổi thứ tự cảnh — nhân sự dựng video làm được ngay, không cần quay lại) hay BẮT BUỘC phải quay lại/chụp lại (cần đội quay dựng cảnh mới). Tuyệt đối tránh các cụm chung chung vô nghĩa như "làm hấp dẫn hơn", "cải thiện chất lượng", "tối ưu nội dung" — nếu định viết cụm như vậy, PHẢI thay bằng hành động cụ thể thay thế nó có nghĩa là gì. Nếu tiêu chí đã đạt điểm cao (≥8/10), "suggestion" có thể ghi ngắn gọn "Đã tốt, giữ nguyên".
 
 RIÊNG tiêu chí số ${hookIdx} (tiêu chí hook/mở đầu) — nếu điểm dưới 8/10 VÀ đang xem VIDEO (nhiều khung hình, có liệt kê "Thời điểm khung hình" ở trên) VÀ trong các khung hình đó có 1 khung hình cho thấy khoảnh khắc mở đầu mạnh/thu hút hơn khung hình đầu hiện tại (chuyển động, cận cảnh sản phẩm, cảm xúc rõ...), hãy thêm field "hookRecutSec" = ĐÚNG 1 trong các số giây đã liệt kê ở trên (KHÔNG bịa số ngoài danh sách, KHÔNG suy diễn số giây không có trong danh sách). Nếu không có khung hình nào tốt hơn, hoặc đây là ảnh tĩnh (không phải video), hoặc điểm đã ≥8/10, để "hookRecutSec": null.
 
 Trả lời DUY NHẤT bằng JSON hợp lệ theo đúng cấu trúc sau, không thêm chữ nào khác ngoài JSON:
-{"totalScore100": <số nguyên 0-100, = trung bình cộng ${rubric.criteria.length} điểm tiêu chí x10>, "criteria": [{"index":1,"score10":<0-10>,"note":"<nhận xét ngắn>","suggestion":"<gợi ý sửa cụ thể, hành động được ngay>","hookRecutSec":<chỉ điền ở ĐÚNG tiêu chí số ${hookIdx} — số giây hoặc null; các tiêu chí khác BỎ QUA field này>"}, ... đủ ${rubric.criteria.length} mục], "recommendation": "<1-2 câu nên sửa gì trước khi chạy quảng cáo, hoặc \\"Đủ điều kiện chạy\\" nếu tốt>"}`;
+{"totalScore100": <số nguyên 0-100, = trung bình cộng ${rubric.criteria.length} điểm tiêu chí x10>, "criteria": [{"index":1,"score10":<0-10>,"note":"<nhận xét ngắn, neo vào chi tiết cụ thể nhìn thấy>","suggestion":"<hành động cụ thể làm ngay được, ghi rõ hậu kỳ hay cần quay lại>","hookRecutSec":<chỉ điền ở ĐÚNG tiêu chí số ${hookIdx} — số giây hoặc null; các tiêu chí khác BỎ QUA field này>"}, ... đủ ${rubric.criteria.length} mục], "recommendation": "<1-2 câu nên sửa gì trước khi chạy quảng cáo, hoặc \\"Đủ điều kiện chạy\\" nếu tốt>"}`;
 }
 
 // Cắt 1 đoạn demo NGẮN (3-6 giây) từ CHÍNH video gốc, bắt đầu ở thời điểm Claude đề xuất — để xem thử "nếu mở
@@ -215,6 +233,130 @@ function cutHookDemoClip(videoPath, workDir, startSec, duration) {
   });
 }
 
+// Tự động dựng lại 1 BẢN VIDEO HOÀN CHỈNH (không chỉ demo hook ngắn) áp dụng các sửa CƠ HỌC làm được chắc chắn
+// bằng ffmpeg, dựa trên đúng khung tiêu chí đang chấm — để nhân sự content/ads có sẵn 1 bản nháp đã sửa thay vì
+// phải tự dựng lại từ đầu theo từng gợi ý chữ. CHỈ áp dụng các sửa có căn cứ rõ ràng từ rubric/kết quả chấm:
+//   1) Cắt bỏ đoạn mở đầu yếu, bắt đầu video từ thời điểm Claude đã chỉ ra (tiêu chí Hook <8/10 + có hookRecutSec).
+//   2) Cắt bớt thời lượng nếu vượt khung khuyến nghị của rubric (CHỈ khi rubric.targetDurationRange có đặt — xem
+//      ghi chú trong rubric.js, TikTok không có tiêu chí thời lượng cụ thể nên KHÔNG tự cắt theo phỏng đoán).
+//   3) Tự crop lại đúng tỷ lệ khung hình dọc 9:16 nếu video gốc quay sai tỷ lệ.
+//   4) Gắn khung chữ CTA ở vài giây cuối — CHỈ khi anh tự nhập sẵn nội dung CTA (không tự bịa chữ thương hiệu).
+// KHÔNG tự làm được (vẫn để lại trong "suggestion" dạng chữ cho nhân sự tự xử lý): phụ đề lời thoại (cần nhận
+// diện giọng nói, chưa có), đổi phong cách quay (native/UGC), thêm logo thương hiệu (cần file logo), quay lại
+// cảnh mới. Trả về null nếu không có sửa nào áp dụng được (nội dung đã đạt hết các tiêu chí tự sửa được).
+function buildAutoEditVideo({ videoPath, workDir, duration, dims, rubric, hookRecutSec, hookNeedsFix, ctaText }) {
+  return new Promise((resolve, reject) => {
+    const applied = [];
+
+    // 1) Cắt bỏ đoạn mở đầu yếu.
+    let startSec = 0;
+    if (hookNeedsFix && typeof hookRecutSec === 'number' && !isNaN(hookRecutSec) && hookRecutSec > 1 && hookRecutSec < duration - 1) {
+      startSec = hookRecutSec;
+      applied.push(`Cắt bỏ ~${Math.round(startSec)} giây mở đầu yếu, video giờ bắt đầu từ đoạn mạnh hơn (theo đề xuất chấm điểm tiêu chí Hook).`);
+    }
+
+    // 2) Cắt bớt thời lượng nếu vượt khung khuyến nghị.
+    const remaining = duration - startSec;
+    let clipDuration = remaining;
+    if (rubric.targetDurationRange) {
+      const [min, max] = rubric.targetDurationRange;
+      if (remaining > max) {
+        clipDuration = max;
+        applied.push(`Cắt bớt còn ${max} giây cho đúng khung thời lượng khuyến nghị của nền tảng (${min}-${max} giây).`);
+      }
+    }
+    if (clipDuration < 1) { resolve(null); return; }
+
+    // 3) Tự crop lại đúng tỷ lệ dọc 9:16 nếu video gốc sai tỷ lệ.
+    const vfParts = [];
+    if (rubric.targetAspectRatio === '9:16' && dims && dims.width && dims.height) {
+      const currentRatio = dims.width / dims.height;
+      const targetRatio = 9 / 16;
+      if (Math.abs(currentRatio - targetRatio) > 0.05) {
+        // Lưu ý cú pháp: dấu phẩy TRONG biểu thức min(...) phải escape bằng "\," (khác dấu phẩy NGOÀI dùng để
+        // nối chuỗi các filter với nhau) — đã kiểm tra thực tế bằng ffmpeg, không bọc nháy đơn quanh biểu thức.
+        vfParts.push('crop=min(iw\\,ih*9/16):min(ih\\,iw*16/9)', 'scale=1080:1920');
+        applied.push(`Tự crop lại khung hình về đúng tỷ lệ dọc 9:16 (video gốc đang tỷ lệ ${dims.width}x${dims.height}, không đúng chuẩn).`);
+      }
+    }
+
+    // 4) Gắn khung chữ CTA cuối video — CHỈ khi có sẵn nội dung CTA do người dùng tự nhập.
+    if (ctaText && String(ctaText).trim()) {
+      const rawText = String(ctaText).trim().slice(0, 40);
+      // Escape ký tự đặc biệt cho cú pháp filter ffmpeg (dấu ':' và '\' phải escape, dấu ''' bọc riêng).
+      const safeText = rawText.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\u2019");
+      // Cỡ chữ tự co theo độ dài chữ để không tràn khung hình dọc 1080px — công thức hiệu chỉnh thực tế bằng ffmpeg (xem test).
+      const fontSize = Math.max(28, Math.min(56, Math.round(950 / (0.66 * Math.max(rawText.length, 1)))));
+      const ctaStart = Math.max(0, clipDuration - 3);
+      vfParts.push(`drawtext=text='${safeText}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:fontsize=${fontSize}:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=16:x=(w-text_w)/2:y=h-th-100:enable='gte(t\\,${ctaStart.toFixed(1)})'`);
+      applied.push(`Gắn khung chữ CTA "${rawText}" ở ${Math.round(clipDuration - ctaStart)} giây cuối video.`);
+    }
+
+    if (!applied.length) { resolve(null); return; } // không có sửa cơ học nào áp dụng được — nội dung đã đạt các tiêu chí tự sửa được
+
+    const outPath = path.join(workDir, 'auto-edit.mp4');
+    const outputOptions = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart'];
+    if (vfParts.length) outputOptions.unshift('-vf', vfParts.join(','));
+
+    ffmpeg(videoPath)
+      .setStartTime(startSec)
+      .duration(clipDuration)
+      .outputOptions(outputOptions)
+      .on('end', async () => {
+        try {
+          const stat = await fsp.stat(outPath);
+          if (stat.size > 15 * 1024 * 1024) {
+            // outPath vẫn giữ lại (KHÔNG null) dù không trả dataUrl — để bước chấm lại điểm bên dưới (rescoreAutoEditedVideo)
+            // vẫn đọc được file thật này, chỉ là không gửi nguyên video nặng về cho trình duyệt.
+            resolve({ dataUrl: null, appliedFixes: applied, outPath, note: 'Video sau khi tự sửa quá nặng (>15MB) để xem trực tiếp trong tool — dùng phần mềm dựng video thông thường để áp dụng các sửa liệt kê ở trên thay vì tải trực tiếp bản này.' });
+            return;
+          }
+          const buf = await fsp.readFile(outPath);
+          resolve({
+            dataUrl: `data:video/mp4;base64,${buf.toString('base64')}`,
+            appliedFixes: applied,
+            outPath,
+            startSec: Math.round(startSec),
+            durationSec: Math.round(clipDuration),
+          });
+        } catch (e) { reject(e); }
+      })
+      .on('error', (err) => reject(err))
+      .save(outPath);
+  });
+}
+
+// Sau khi tự dựng lại video (buildAutoEditVideo), CHẤM LẠI ĐIỂM chính bản video đã sửa đó — để trả lời thẳng câu
+// hỏi "sửa xong thì điểm có thật sự cao hơn không", không chỉ liệt kê đã sửa gì rồi để nhân sự tự đoán. Cắt lại
+// khung hình TỪ CHÍNH file đã sửa (outPath), chấm lại y hệt quy trình chấm chính (cùng buildPrompt, cùng rubric),
+// rồi trả về điểm mới để tool hiện "Điểm trước → Điểm sau khi tự sửa". Best-effort — lỗi ở đây KHÔNG được làm
+// hỏng phần "đã tự sửa gì" đã có sẵn (nhân sự vẫn dùng được video đã sửa dù không chấm lại được).
+async function rescoreAutoEditedVideo({ outPath, rubric, platform, objective, variant, topic }) {
+  const rescoreDir = path.join(path.dirname(outPath), 'rescore');
+  await fsp.mkdir(rescoreDir, { recursive: true });
+  const newDuration = await ffprobeDuration(outPath);
+  if (!newDuration) return null;
+  const { frames: frameList, duration } = await extractFramesForVideo(outPath, rescoreDir);
+  if (!frameList.length) return null;
+  const imageBuffers = await Promise.all(frameList.map(async (f) => ({ buf: await fsp.readFile(f.path), mediaType: 'image/jpeg' })));
+  const labeled = labelFramesForVideo(frameList, duration);
+  const frameMeta = frameList.map((f, i) => ({ label: (labeled[i] && labeled[i].label) || `Khung hình ${i + 1}`, timestampSec: f.timestampSec }));
+  const prompt = buildPrompt({ platform, objective, variant, topic, frameCount: imageBuffers.length, frameMeta, duration });
+  const content = [
+    { type: 'text', text: prompt },
+    ...imageBuffers.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.buf.toString('base64') } })),
+  ];
+  const message = await anthropic.messages.create({ model: CLAUDE_MODEL, max_tokens: 2048, messages: [{ role: 'user', content }] });
+  const textOut = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  const jsonMatch = textOut.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+  const parsed = JSON.parse(jsonMatch[0]);
+  if (parsed && Array.isArray(parsed.criteria)) {
+    parsed.criteria = parsed.criteria.map((c) => ({ ...c, label: rubric.criteria[(Number(c.index) || 1) - 1] || `Tiêu chí ${c.index}` }));
+  }
+  return parsed;
+}
+
 // Gọi Claude kèm công cụ tìm kiếm web (best-effort) để tìm 1-2 quảng cáo THẬT cùng ngành có hook tốt, tham khảo
 // cách làm. KHÔNG được để lỗi ở đây làm hỏng cả kết quả chấm điểm chính — mọi lỗi đều bị bắt và trả về mảng rỗng.
 async function findHookReferenceExamples({ platform, topic }) {
@@ -252,7 +394,7 @@ app.post('/analyze', async (req, res) => {
   if (!checkSecret(req, res)) return;
   if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, error: 'Server chưa cấu hình ANTHROPIC_API_KEY.' });
 
-  const { link, platform, objective, variant, topic } = req.body || {};
+  const { link, platform, objective, variant, topic, ctaText } = req.body || {};
   if (!link || !platform || !CONTENT_SCORING_RUBRIC[platform]) {
     return res.status(400).json({ ok: false, error: 'Thiếu link hoặc nền tảng không hợp lệ.' });
   }
@@ -268,6 +410,7 @@ app.post('/analyze', async (req, res) => {
     let frameMeta = []; // [{label, timestampSec?}] — cùng thứ tự với imageBuffers, dùng để hiện lại khung hình cho người xem
     let videoPath = null; // chỉ khác null khi nội dung là VIDEO — cần giữ lại để cắt demo hook bên dưới (Bước sau khi Claude chấm xong)
     let duration = null;
+    let dims = null; // {width, height} — chỉ đọc khi là video, dùng để biết có cần tự crop lại tỷ lệ khung hình hay không
     if (contentType.startsWith('image/')) {
       imageBuffers = [{ buf: await fsp.readFile(rawPath), mediaType: contentType.includes('png') ? 'image/png' : 'image/jpeg' }];
       frameMeta = [{ label: 'Ảnh nội dung nháp' }];
@@ -283,6 +426,7 @@ app.post('/analyze', async (req, res) => {
       const labeled = labelFramesForVideo(frameList, duration);
       // Gộp timestampSec (từ frameList) vào frameMeta (label) — buildPrompt cần cả hai để chỉ đích danh thời điểm cho Claude.
       frameMeta = frameList.map((f, i) => ({ label: (labeled[i] && labeled[i].label) || `Khung hình ${i + 1}`, timestampSec: f.timestampSec }));
+      dims = await ffprobeDimensions(videoPath);
     }
 
     const prompt = buildPrompt({ platform, objective, variant, topic, frameCount: imageBuffers.length, frameMeta, duration });
@@ -356,7 +500,44 @@ app.post('/analyze', async (req, res) => {
       }
     }
 
-    return res.json({ ok: true, result: parsed, framesAnalyzed: imageBuffers.length, frames, hookDemo, hookReferenceExamples });
+    // Tự dựng lại 1 BẢN VIDEO HOÀN CHỈNH áp dụng các sửa cơ học làm được chắc chắn (cắt mở đầu yếu, cắt bớt thời
+    // lượng, crop lại tỷ lệ khung hình, gắn CTA nếu có) — xem chi tiết phạm vi/giới hạn ở buildAutoEditVideo().
+    // Best-effort, KHÔNG được làm hỏng kết quả chấm điểm chính đã có ở trên.
+    let autoEditVideo = null;
+    if (videoPath && duration) {
+      try {
+        const hookNeedsFix = !!(hookCriterion && !isNaN(Number(hookCriterion.score10)) && Number(hookCriterion.score10) < 8);
+        autoEditVideo = await buildAutoEditVideo({
+          videoPath,
+          workDir,
+          duration,
+          dims,
+          rubric,
+          hookRecutSec: hookCriterion ? Number(hookCriterion.hookRecutSec) : NaN,
+          hookNeedsFix,
+          ctaText,
+        });
+      } catch (e) {
+        console.error('Lỗi tự dựng video (bỏ qua, không chặn kết quả chấm điểm chính):', e.message);
+      }
+
+      // Chấm lại điểm CHÍNH bản video đã tự sửa — trả lời thẳng "sửa xong điểm có cao hơn không", không chỉ liệt
+      // kê đã sửa gì. Best-effort: lỗi ở đây không mất phần "đã tự sửa gì" đã có, chỉ là không có điểm so sánh.
+      if (autoEditVideo && autoEditVideo.outPath) {
+        try {
+          const rescoredResult = await rescoreAutoEditedVideo({ outPath: autoEditVideo.outPath, rubric, platform, objective, variant, topic });
+          if (rescoredResult) {
+            autoEditVideo.rescoredResult = rescoredResult;
+            autoEditVideo.scoreBefore = typeof parsed.totalScore100 === 'number' ? parsed.totalScore100 : null;
+          }
+        } catch (e) {
+          console.error('Lỗi chấm lại điểm video đã tự sửa (bỏ qua, video đã sửa vẫn dùng được bình thường):', e.message);
+        }
+        delete autoEditVideo.outPath; // đường dẫn file trên server — không trả về cho trình duyệt
+      }
+    }
+
+    return res.json({ ok: true, result: parsed, framesAnalyzed: imageBuffers.length, frames, hookDemo, hookReferenceExamples, autoEditVideo });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: err.message || 'Lỗi không xác định.' });
