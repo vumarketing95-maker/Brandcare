@@ -130,12 +130,24 @@ async function extractFramesForVideo(filePath, workDir) {
     const outPath = path.join(workDir, `frame-${i}.jpg`);
     try {
       await extractFrame(filePath, timestamps[i], outPath);
-      frames.push(outPath);
+      frames.push({ path: outPath, timestampSec: timestamps[i] });
     } catch (e) {
       console.error('Lỗi cắt frame ở giây', timestamps[i], e.message);
     }
   }
-  return frames;
+  return { frames, duration };
+}
+
+// Đặt tên dễ hiểu cho từng khung hình (VD "Đầu video (~5%)") để tool hiện lại đúng thứ tự, giúp người xem biết
+// CHÍNH XÁC Claude đã nhìn thấy phần nào của video khi chấm — không phải chỉ 1 con số điểm chung chung.
+function labelFramesForVideo(frameList, duration) {
+  return frameList.map((f, i) => {
+    if (!duration || duration <= 1) return { label: `Khung hình ${i + 1}` };
+    const pct = Math.max(0, Math.min(100, Math.round((f.timestampSec / duration) * 100)));
+    if (i === 0) return { label: `Đầu video (~${pct}%)` };
+    if (i === frameList.length - 1) return { label: `Cuối video (~${pct}%)` };
+    return { label: `Giữa video (~${pct}%)` };
+  });
 }
 
 function buildPrompt(item) {
@@ -148,8 +160,10 @@ Nội dung mới hay biến thể: ${item.variant || 'Mới hoàn toàn'}
 Chấm theo từng tiêu chí sau (mỗi tiêu chí 0–10 điểm, dựa trên các khung hình đang thấy — nếu tiêu chí liên quan tới chuyển động/âm thanh mà không đánh giá chắc chắn được từ ảnh tĩnh, hãy chấm điểm trung bình 5-6 và ghi rõ trong "note" là "không đánh giá được đầy đủ từ khung hình tĩnh"):
 ${rubric.criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 
+Với MỖI tiêu chí, ngoài "note" (giải thích NGẮN vì sao được điểm đó, dựa trên những gì thấy trong khung hình), bắt buộc có thêm "suggestion" — một gợi ý sửa CỤ THỂ, hành động được ngay (VD: "Thêm phụ đề tiếng Việt cỡ chữ lớn ở nửa dưới khung hình", "Cắt bỏ 2 giây đầu đang đứng yên, mở đầu ngay bằng cảnh cận sản phẩm"), không chấm chung chung "làm tốt hơn". Nếu tiêu chí đã đạt điểm cao (≥8/10), "suggestion" có thể ghi ngắn gọn "Đã tốt, giữ nguyên".
+
 Trả lời DUY NHẤT bằng JSON hợp lệ theo đúng cấu trúc sau, không thêm chữ nào khác ngoài JSON:
-{"totalScore100": <số nguyên 0-100, = trung bình cộng 6 điểm tiêu chí x10>, "criteria": [{"index":1,"score10":<0-10>,"note":"<nhận xét ngắn>"}, ... đủ 6 mục], "recommendation": "<1-2 câu nên sửa gì trước khi chạy quảng cáo, hoặc \\"Đủ điều kiện chạy\\" nếu tốt>"}`;
+{"totalScore100": <số nguyên 0-100, = trung bình cộng 6 điểm tiêu chí x10>, "criteria": [{"index":1,"score10":<0-10>,"note":"<nhận xét ngắn>","suggestion":"<gợi ý sửa cụ thể, hành động được ngay>"}, ... đủ 6 mục], "recommendation": "<1-2 câu nên sửa gì trước khi chạy quảng cáo, hoặc \\"Đủ điều kiện chạy\\" nếu tốt>"}`;
 }
 
 app.post('/analyze', async (req, res) => {
@@ -160,6 +174,7 @@ app.post('/analyze', async (req, res) => {
   if (!link || !platform || !CONTENT_SCORING_RUBRIC[platform]) {
     return res.status(400).json({ ok: false, error: 'Thiếu link hoặc nền tảng không hợp lệ.' });
   }
+  const rubric = CONTENT_SCORING_RUBRIC[platform];
 
   const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'scoring-'));
   try {
@@ -168,15 +183,18 @@ app.post('/analyze', async (req, res) => {
     const { contentType } = await downloadToTemp(directUrl, rawPath);
 
     let imageBuffers = [];
+    let frameMeta = []; // [{label}] — cùng thứ tự với imageBuffers, dùng để hiện lại khung hình cho người xem
     if (contentType.startsWith('image/')) {
       imageBuffers = [{ buf: await fsp.readFile(rawPath), mediaType: contentType.includes('png') ? 'image/png' : 'image/jpeg' }];
+      frameMeta = [{ label: 'Ảnh nội dung nháp' }];
     } else {
       // Coi như video — đổi tên có phần mở rộng để ffmpeg nhận diện đúng, rồi cắt frame.
       const videoPath = rawPath + '.mp4';
       await fsp.rename(rawPath, videoPath);
-      const framePaths = await extractFramesForVideo(videoPath, workDir);
-      if (!framePaths.length) throw new Error('Không cắt được khung hình nào từ video — file có thể bị hỏng hoặc không đúng định dạng video.');
-      imageBuffers = await Promise.all(framePaths.map(async (p) => ({ buf: await fsp.readFile(p), mediaType: 'image/jpeg' })));
+      const { frames: frameList, duration } = await extractFramesForVideo(videoPath, workDir);
+      if (!frameList.length) throw new Error('Không cắt được khung hình nào từ video — file có thể bị hỏng hoặc không đúng định dạng video.');
+      imageBuffers = await Promise.all(frameList.map(async (f) => ({ buf: await fsp.readFile(f.path), mediaType: 'image/jpeg' })));
+      frameMeta = labelFramesForVideo(frameList, duration);
     }
 
     const prompt = buildPrompt({ platform, objective, variant, frameCount: imageBuffers.length });
@@ -200,7 +218,24 @@ app.post('/analyze', async (req, res) => {
       return res.status(502).json({ ok: false, error: 'Claude trả về không đúng định dạng JSON mong đợi.', raw: textOut });
     }
 
-    return res.json({ ok: true, result: parsed, framesAnalyzed: imageBuffers.length });
+    // Gắn thêm "label" (tên tiêu chí thật, đọc từ rubric) vào từng dòng điểm Claude trả về — Claude chỉ trả
+    // {index, score10, note, suggestion}, tool cần tên tiêu chí đầy đủ để hiện bảng chi tiết biết ĐÚNG chỗ đang
+    // mất điểm. "suggestion" (gợi ý sửa cụ thể) đã có sẵn trong Claude trả về nên tự đi theo qua "...c".
+    if (parsed && Array.isArray(parsed.criteria)) {
+      parsed.criteria = parsed.criteria.map((c) => ({
+        ...c,
+        label: rubric.criteria[(Number(c.index) || 1) - 1] || `Tiêu chí ${c.index}`,
+      }));
+    }
+
+    // Trả lại chính các khung hình đã gửi cho Claude chấm (dạng data URL, đủ nhỏ vì đã resize 640px lúc cắt) —
+    // để tool hiện lại đúng những gì Claude đã "nhìn thấy", đối chiếu trực tiếp với điểm/nhận xét từng tiêu chí.
+    const frames = imageBuffers.map((im, i) => ({
+      label: (frameMeta[i] && frameMeta[i].label) || `Khung hình ${i + 1}`,
+      dataUrl: `data:${im.mediaType};base64,${im.buf.toString('base64')}`,
+    }));
+
+    return res.json({ ok: true, result: parsed, framesAnalyzed: imageBuffers.length, frames });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: err.message || 'Lỗi không xác định.' });
