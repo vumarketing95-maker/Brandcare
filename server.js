@@ -203,9 +203,12 @@ app.post('/analyze', async (req, res) => {
       ...imageBuffers.map((im) => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.buf.toString('base64') } })),
     ];
 
+    // max_tokens: 2048 — TĂNG từ 1024 vì mỗi tiêu chí giờ có thêm "suggestion" (gợi ý sửa cụ thể) bên cạnh
+    // "note", gần như gấp đôi lượng chữ Claude cần trả về cho 6 tiêu chí; 1024 hay bị cắt giữa chừng làm JSON
+    // trả về không đủ dấu đóng ngoặc → lỗi "không đúng định dạng JSON mong đợi" dù Claude chấm đúng, chỉ là bị cụt.
     const message = await anthropic.messages.create({
       model: CLAUDE_MODEL,
-      max_tokens: 1024,
+      max_tokens: 2048,
       messages: [{ role: 'user', content }],
     });
 
@@ -215,7 +218,13 @@ app.post('/analyze', async (req, res) => {
       const jsonMatch = textOut.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : textOut);
     } catch (e) {
-      return res.status(502).json({ ok: false, error: 'Claude trả về không đúng định dạng JSON mong đợi.', raw: textOut });
+      // Nếu bị cắt cụt do hết max_tokens, nói rõ ra thay vì chỉ báo "sai định dạng" chung chung — giúp biết ngay
+      // cần tăng max_tokens tiếp hay đây là lỗi khác (Claude tự ý thêm chữ ngoài JSON).
+      const truncated = message.stop_reason === 'max_tokens';
+      const errMsg = truncated
+        ? 'Claude trả lời bị cắt cụt giữa chừng (hết giới hạn token) nên JSON không đầy đủ. Thử bấm "🤖 Phân tích ngay" lại — nếu vẫn lỗi này, cần tăng max_tokens trong server.js.'
+        : 'Claude trả về không đúng định dạng JSON mong đợi.';
+      return res.status(502).json({ ok: false, error: errMsg, raw: textOut, stopReason: message.stop_reason });
     }
 
     // Gắn thêm "label" (tên tiêu chí thật, đọc từ rubric) vào từng dòng điểm Claude trả về — Claude chỉ trả
